@@ -1,0 +1,83 @@
+#!/bin/sh
+
+set -e
+
+if ! [ $# -eq 3 ]; then
+	printf "usage: [mount|umount] <image> <root-dir>\n" >&2
+	exit 1
+fi
+
+LOOPDEV=/dev/loopimg
+MAJOR=7
+MINOR=20
+
+ACTION="$1"
+IMAGE="$2"
+ROOT_DIR="$3"
+
+if ! [ -f "$IMAGE" ]; then
+	printf "image not found: %s\n" "$IMAGE" >&2
+	exit 2
+fi
+
+PART_INFO="$(fdisk -l "$IMAGE" | grep "$IMAGE[0-9]" | sed s/*//)"
+PART_COUNT="$(echo "$PART_INFO" | wc -l)"
+
+if ! [ $PART_COUNT -eq 3 ]; then
+	printf "unexpected image content: should contain exactly 3 partitions\n" >&2
+	exit 2
+fi
+
+case "$ACTION" in
+mount)
+	[ -e "$LOOPDEV" ] || mknod "$LOOPDEV" b $MAJOR ${MINOR}0
+	losetup $LOOPDEV "$IMAGE"
+
+	for PART in $(seq 1 $PART_COUNT); do
+		PART_NAME=${IMAGE}${PART}
+		PART_DEV=${LOOPDEV}p${PART}
+		PART_MINOR=${MINOR}${PART}
+		MOUNT_POINT=${ROOT_DIR}/p${PART}
+
+		[ -e "$PART_DEV" ] || mknod "$PART_DEV" b $MAJOR $PART_MINOR
+		[ -d "$MOUNT_POINT" ] || mkdir -p "$MOUNT_POINT"
+
+		START=$(echo "$PART_INFO" | grep "$PART_NAME" | awk '{print $2}')
+		END=$(echo "$PART_INFO" | grep "$PART_NAME" | awk '{print $3}')
+
+		OFFSET=$(expr $START \* 512)
+		SIZE=$(expr \( $END - $START + 1 \) \* 512)
+
+		printf "partition = %s, offset = %s, size = %s\n" $PART $OFFSET $SIZE
+
+		# map partition to device node
+		losetup -o $OFFSET --sizelimit $SIZE $PART_DEV $LOOPDEV
+
+		# mount it
+		mount "$PART_DEV" "$MOUNT_POINT"
+	done
+	;;
+
+umount)
+	for PART in $(seq 1 $PART_COUNT); do
+		PART_DEV=${LOOPDEV}p${PART}
+
+		umount "$PART_DEV" || true
+
+		losetup -d "$PART_DEV" || true
+
+		rm "$PART_DEV" || true
+	done
+
+	losetup -d $LOOPDEV || true
+	rm "$LOOPDEV" || true
+
+	rm -rf "$ROOT_DIR"
+	;;
+
+*)
+	printf "unexpected action: %s\n" "$ACTION" >&2
+	exit 1
+	;;
+
+esac
